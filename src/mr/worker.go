@@ -50,7 +50,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	for true {
 		mapTask := FetchMapTask()
-		if len(mapTask.files) == 0 {
+		if mapTask.stage != "MAP" || len(mapTask.files) == 0 {
 			// all map tasks have been allocated
 			break
 		}

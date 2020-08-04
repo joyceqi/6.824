@@ -27,21 +27,33 @@ type Master struct {
 // allocate map task to each worker
 func (m *Master) AllocateMapTask(args *WorkerHost, reply *Task) error {
 	m.lock.Lock()
+	var allFinished bool = true
 	if m.mapAllocated == false {
 		for _, mapTask := range m.mapList {
 			curTime := time.Now().Unix()
+			if mapTask.status != "FINISHED" {
+				allFinished = false
+			}
 			if mapTask.status == "NOTASSIGNED" ||
 				(mapTask.status == "ASSIGNED" && mapTask.allocateTime > 0 && curTime-mapTask.allocateTime > 10) {
 				mapTask.status = "ASSIGNED"
 				mapTask.allocateTime = curTime
 				reply.id = mapTask.id
+				reply.stage = mapTask.stage
 				reply.files = mapTask.files
 				reply.nReduce = mapTask.nReduce
 				return nil
 			}
 		}
 	}
-	m.mapAllocated = true
+	if allFinished {
+		m.mapAllocated = true
+		//AllocateReduceTask()
+	} else {
+		// not all "FINISHED", but some "ASSIGNED" with execution time < 10s
+		reply.stage = "WAIT"
+		return nil
+	}
 	m.lock.Unlock()
 	reply.files = []string{}
 	return nil
