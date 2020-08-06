@@ -38,6 +38,20 @@ type Task struct {
 	nReduce int
 }
 
+// request of worker ask for task
+type RequestTaskArgs struct {
+}
+
+// request after worker run tasks
+type RequestAckArgs struct {
+	taskType string // MAP, REDUCE
+	files []string
+}
+
+// reply for RequestAckArgs
+type ReplyAckArgs struct {
+
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.

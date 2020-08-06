@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -18,17 +19,26 @@ type Master struct {
 	mapList []Task
 	reduceList []Task
 	nReduce int
-	mapAllocated bool
+	isMapFinished bool
+	isReduceFinished bool
 	lock sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// allocate map task to each worker
-func (m *Master) AllocateMapTask(args *WorkerHost, reply *Task) error {
+// worker ask master for a task
+func (m *Master) AskForTask(args *RequestTaskArgs, reply *Task) error {
+	fmt.Println("Start AskForTask")
 	m.lock.Lock()
-	var allFinished bool = true
-	if m.mapAllocated == false {
+	defer m.lock.Unlock()
+
+	if m.isReduceFinished == true {
+		reply.stage = "EXIT"
+		return nil
+	}
+
+	if m.isMapFinished == false {
+		var allFinished bool = true
 		for _, mapTask := range m.mapList {
 			curTime := time.Now().Unix()
 			if mapTask.status != "FINISHED" {
@@ -45,32 +55,67 @@ func (m *Master) AllocateMapTask(args *WorkerHost, reply *Task) error {
 				return nil
 			}
 		}
+		if allFinished == false {
+			// not all "FINISHED", but some "ASSIGNED" with execution time < 10s
+			reply.stage = "WAIT"
+			return nil
+		}
+	} else if m.isReduceFinished == false {
+		for _, reduceTask := range m.reduceList {
+			curTime := time.Now().Unix()
+			if reduceTask.status == "NOTASSIGNED" ||
+				(reduceTask.status == "ASSIGNED" && reduceTask.allocateTime > 0 && curTime-reduceTask.allocateTime > 10) {
+				reduceTask.status = "ASSIGNED"
+				reduceTask.allocateTime = curTime
+				reply.id = reduceTask.id
+				reply.stage = reduceTask.stage
+				reply.files = reduceTask.files
+				reply.nReduce = reduceTask.nReduce
+				return nil
+			}
+		}
+
 	}
-	if allFinished {
-		m.mapAllocated = true
-		//AllocateReduceTask()
-	} else {
-		// not all "FINISHED", but some "ASSIGNED" with execution time < 10s
-		reply.stage = "WAIT"
-		return nil
-	}
-	m.lock.Unlock()
-	reply.files = []string{}
 	return nil
 }
 
-// record mediate filename in master.reduceList
-func (m *Master) ReportMediateFile(args []string, reply int) error {
+// ack from worker to confirm master's state
+func (m *Master) confirmState(args *RequestAckArgs, reply *ReplyAckArgs) error {
 	m.lock.Lock()
-	var mapTaskid int
-	for _, filename := range args {
-		ret := strings.Split(filename, "-")
-		mapTaskid, _ = strconv.Atoi(ret[1])
-		y, _ := strconv.Atoi(ret[2])
-		m.reduceList[y].files = append(m.reduceList[y].files, filename)
+	defer m.lock.Unlock()
+
+	if args.taskType == "MAP" {
+		// update Master.reduceList.files
+		var mapTaskid int
+		for _, filename := range args.files {
+			ret := strings.Split(filename, "-")
+			mapTaskid, _ = strconv.Atoi(ret[1])
+			y, _ := strconv.Atoi(ret[2])
+			m.reduceList[y].files = append(m.reduceList[y].files, filename)
+		}
+		// update Master.mapList and isMapFinished
+		m.mapList[mapTaskid].status = "FINISHED"
+		for _, t := range m.mapList {
+			if t.status != "FINISHED" {
+				return nil
+			}
+		}
+		m.isMapFinished = true
+	} else if args.taskType == "REDUCE" {
+		// update Master.isReduceFinished
+		for _, filename := range args.files {
+			ret := strings.Split(filename, "-")
+			reduceTaskid, _ := strconv.Atoi(ret[2])
+			m.reduceList[reduceTaskid].status = "FINISHED"
+		}
+		for _, t := range m.reduceList {
+			if t.status != "FINISHED" {
+				return nil
+			}
+		}
+		m.isReduceFinished = true
 	}
-	m.mapList[mapTaskid].status = "FINISHED"
-	m.lock.Unlock()
+
 	return nil
 }
 

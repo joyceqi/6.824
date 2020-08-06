@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -48,15 +49,12 @@ func Worker(mapf func(string, string) []KeyValue,
 	worker.mapf = mapf
 	worker.reducef = reducef
 
-	for true {
-		mapTask := FetchMapTask()
-		if mapTask.stage != "MAP" || len(mapTask.files) == 0 {
-			// all map tasks have been allocated
+	for {
+		flag := RunTaskCall(mapf, reducef)
+		time.Sleep(time.Second)
+		if flag == 0 {
 			break
 		}
-		ProcessMapTask(mapTask.files, &worker)
-		WriteToMediate(mapTask.id, mapTask.nReduce, &worker)
-
 	}
 
 	// uncomment to send the Example RPC to the master.
@@ -64,21 +62,36 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-// ask the master for a task
-func FetchMapTask() Task {
-	args := WorkerHost{}
-	args.ip = "127.0.0.1"
-	args.port = 1234
+func RunTaskCall(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) int {
 
+	args := RequestTaskArgs{}
 	reply := Task{}
+	call("Master.AskForTask", &args, &reply)
 
-	call("Master.AllocateMapTask", &args, &reply)
-	return reply
+	if reply.stage == "MAP" {
+		fmt.Println("Worker start a map task")
+		return RunMapTask(reply, mapf)
+	} else if reply.stage == "REDUCE" {
+		fmt.Println("Worker start a reduce task")
+		return RunReduceTask(reply, reducef)
+	} else if reply.stage == "WAIT" {
+		fmt.Println("Worker wait for task")
+		return 1
+	} else if reply.stage == "EXIT" {
+		fmt.Println("No tasks worker exit")
+		return 0
+	}
+	return 1
 }
 
-// process task with one file
-func ProcessMapTask(files []string, worker *WorkerInfo) {
-	worker.intermediate = []KeyValue{}
+func RunMapTask(mapTask Task, mapf func(string, string) []KeyValue) int {
+	files := mapTask.files
+	nReduce := mapTask.nReduce
+	mapTaskId := mapTask.id
+
+	// apply mapf() on mapTask.files to get []KeyValue
+	reduceKVMap := make(map[int][]KeyValue)
 	for _, filename := range files {
 		file, err := os.Open(filename)
 		if err != nil {
@@ -89,45 +102,49 @@ func ProcessMapTask(files []string, worker *WorkerInfo) {
 			log.Fatalf("cannot read %v", filename)
 		}
 		file.Close()
-		kva := worker.mapf(filename, string(content))
-		worker.intermediate = append(worker.intermediate, kva...)
+		kvs := mapf(filename, string(content))
+		for _, kv := range kvs {
+			k := ihash(kv.Key) % nReduce
+			reduceKVMap[k] = append(reduceKVMap[k], kv)
+		}
 	}
-}
 
-// write map task's intermediate data to temporary file and then rename to mr-x-y
-// x: map task id
-// y: hash(key) % nReduce
-func WriteToMediate(mapTaskId int, nReduce int, worker *WorkerInfo) {
-	reduceKVMap := make(map[int][]KeyValue)
-	for _, kva := range worker.intermediate {
-		k := ihash(kva.Key) % nReduce
-		reduceKVMap[k] = append(reduceKVMap[k], kva)
-	}
-	mediateFilenameMap := make(map[string]string)
-	for y, kvs := range(reduceKVMap) {
-		filename := fmt.Sprint("mr-%d-%d", mapTaskId, y)
-		data := ""
-		for i, kv := range kvs {
-			data += fmt.Sprint("%s %s", kv.Key, kv.Value)
-			if i < len(kvs)-1 {
-				data += "\n"
+	// write map result into nReduce intermediate files: mr-x-y
+	// x: map task id
+	// y: hash(key) % nReduce
+	var mediateFilenames []string
+	for y := 0; y < nReduce; y++ {
+		if kvs, ok := reduceKVMap[y]; ok {
+			filename := fmt.Sprintf("mr-%d-%d", mapTaskId, y)
+			data := ""
+			for i, kv := range kvs {
+				data += fmt.Sprintf("%s %s", kv.Key, kv.Value)
+				if i < len(kvs)-1 {
+					data += "\n"
+				}
+			}
+			err := ioutil.WriteFile(filename, []byte(data), 0666)
+			if err != nil {
+				log.Fatalf("cannot write %v", filename)
+			} else {
+				mediateFilenames = append(mediateFilenames, filename)
 			}
 		}
-		err := ioutil.WriteFile(filename, []byte(data), 0644)
-		if err != nil {
-			log.Fatalf("cannot write %v", filename)
-		} else {
-			mediateFilenameMap[filename] = ""
-		}
 	}
-	mediateFilenames := []string{}
-	for filename, _ := range(mediateFilenameMap) {
-		mediateFilenames = append(mediateFilenames, filename)
-	}
-	var reply int
-	call("Master.ReportMediateFile", mediateFilenames, reply)
+	fmt.Println("Finish a MAP task")
+
+	rAckargs := RequestAckArgs{}
+	rAckargs.taskType = "MAP"
+	rAckargs.files = mediateFilenames
+	replyAckargs := ReplyAckArgs{}
+	call("Master.ConfirmState", &rAckargs, &replyAckargs)
+
+	return 1
 }
 
+func RunReduceTask(mapTask Task, reducef func(string, []string) string) int {
+	return 1
+}
 
 //
 // example function to show how to make an RPC call to the master.
